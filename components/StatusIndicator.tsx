@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { Loader2, ShieldCheck, Zap } from 'lucide-react';
+import { Loader2, ShieldCheck, Zap, Scissors } from 'lucide-react';
 import { ProcessingStatus } from '../types';
 
 interface StatusIndicatorProps {
@@ -11,22 +11,23 @@ export const StatusIndicator: React.FC<StatusIndicatorProps> = ({ status }) => {
   if (status === 'idle') return null;
 
   const steps = [
-    { id: 'uploading', label: 'Preparando Mídia', icon: <ShieldCheck size={18} /> },
-    { id: 'processing', label: 'IA Gemini Transcrevendo', icon: <Zap size={18} /> },
-    { id: 'success', label: 'Pronto', icon: <ShieldCheck size={18} /> },
+    { id: 'optimizing', label: 'Otimizando Mídia', icon: <Scissors size={18} /> },
+    { id: 'uploading', label: 'Subindo Dados', icon: <ShieldCheck size={18} /> },
+    { id: 'processing', label: 'IA Transcrevendo', icon: <Zap size={18} /> },
   ];
 
   const getCurrentIndex = () => {
-    if (status === 'uploading') return 0;
-    if (status === 'processing') return 1;
-    if (status === 'success') return 2;
+    if (status === 'optimizing') return 0;
+    if (status === 'uploading') return 1;
+    if (status === 'processing') return 2;
+    if (status === 'success') return 3;
     return -1;
   };
 
   const currentIndex = getCurrentIndex();
 
   return (
-    <div className="bg-zinc-900/50 border border-zinc-800 p-8 rounded-3xl flex flex-col items-center gap-8 max-w-xl mx-auto text-center">
+    <div className="bg-zinc-900/50 border border-zinc-800 p-8 rounded-3xl flex flex-col items-center gap-8 max-w-xl mx-auto text-center animate-in fade-in duration-500">
         {status !== 'success' && (
             <div className="relative">
                 <div className="w-24 h-24 rounded-full border-4 border-zinc-800 border-t-violet-500 animate-spin"></div>
@@ -38,16 +39,18 @@ export const StatusIndicator: React.FC<StatusIndicatorProps> = ({ status }) => {
         
         <div className="space-y-2">
             <h2 className="text-2xl font-black italic uppercase tracking-tight">
-                {status === 'uploading' && 'Inalando Dados...'}
+                {status === 'optimizing' && 'Esmagando Frequências...'}
+                {status === 'uploading' && 'Injetando no Servidor...'}
                 {status === 'processing' && 'Mastigando Lexemas...'}
-                {status === 'error' && 'Falha Crítica'}
             </h2>
             <p className="text-zinc-500 font-medium">
-                Nosso modelo está analisando cada frequência para garantir precisão total.
+                {status === 'optimizing' 
+                  ? 'Reduzindo 500MB para <15MB sem perder precisão.' 
+                  : 'Análise profunda em andamento para garantir fidelidade total.'}
             </p>
         </div>
 
-        <div className="flex items-center gap-4 w-full">
+        <div className="flex items-center gap-4 w-full px-4">
             {steps.map((step, i) => (
                 <React.Fragment key={step.id}>
                     <div className="flex flex-col items-center gap-2 flex-1">
@@ -59,12 +62,12 @@ export const StatusIndicator: React.FC<StatusIndicatorProps> = ({ status }) => {
                         `}>
                             {step.icon}
                         </div>
-                        <span className={`text-[10px] font-bold uppercase tracking-wider ${i === currentIndex ? 'text-violet-400' : 'text-zinc-600'}`}>
+                        <span className={`text-[9px] font-bold uppercase tracking-wider ${i === currentIndex ? 'text-violet-400' : 'text-zinc-600'}`}>
                             {step.label}
                         </span>
                     </div>
                     {i < steps.length - 1 && (
-                        <div className={`h-[2px] w-8 rounded-full transition-colors duration-1000 ${i < currentIndex ? 'bg-emerald-500/50' : 'bg-zinc-800'}`}></div>
+                        <div className={`h-[2px] w-4 sm:w-8 rounded-full transition-colors duration-1000 ${i < currentIndex ? 'bg-emerald-500/50' : 'bg-zinc-800'}`}></div>
                     )}
                 </React.Fragment>
             ))}

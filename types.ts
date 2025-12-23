@@ -4,9 +4,10 @@ export interface TranscriptionResult {
   summary: string;
   keyPoints: string[];
   speakers: string[];
+  suggestedTitle: string;
 }
 
-export type ProcessingStatus = 'idle' | 'uploading' | 'processing' | 'success' | 'error';
+export type ProcessingStatus = 'idle' | 'optimizing' | 'uploading' | 'processing' | 'success' | 'error';
 
 export interface FileMetadata {
   name: string;
