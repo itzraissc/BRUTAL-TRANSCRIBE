@@ -1,0 +1,7 @@
+{
+  "name": "BrutalTranscribe",
+  "description": "A high-performance, ultra-accurate speech-to-text application powered by Gemini 3 Flash. Effortlessly transcribe audio and video files with clean, structured output and summaries.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
