@@ -1,10 +1,7 @@
 
-
 import React, { useState } from 'react';
 import { TranscriptionResult } from '../types';
-import { Copy, Check, Download, List, FileText, User, FileType, File, Clock, ExternalLink } from 'lucide-react';
-import { jsPDF } from "jspdf";
-import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from "docx";
+import { Copy, Check, Download, Clock, ExternalLink } from 'lucide-react';
 
 interface ResultDisplayProps {
   result: TranscriptionResult;
@@ -12,7 +9,6 @@ interface ResultDisplayProps {
 
 export const ResultDisplay: React.FC<ResultDisplayProps> = ({ result }) => {
   const [copied, setCopied] = useState(false);
-  const [activeTab, setActiveTab] = useState<'transcription' | 'summary'>('transcription');
 
   const copyToClipboard = () => {
     navigator.clipboard.writeText(result.text);
@@ -35,7 +31,6 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({ result }) => {
     element.click();
   };
 
-  // Renderiza o texto com timestamps destacados
   const renderTranscription = () => {
     return result.text.split('\n').map((line, i) => {
       const timestampMatch = line.match(/^(\[\d{2}:\d{2}\])/);
@@ -101,7 +96,6 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({ result }) => {
             </ul>
           </section>
 
-          {/* Renderização de URLs de busca conforme diretrizes do Google Search Grounding */}
           {result.sourceUrls && result.sourceUrls.length > 0 && (
             <section className="bg-zinc-900 border border-zinc-800 p-6 rounded-2xl">
               <h3 className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-4">Fontes de Pesquisa</h3>
