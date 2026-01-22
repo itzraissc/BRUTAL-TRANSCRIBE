@@ -1,7 +1,8 @@
 
+
 import React, { useState } from 'react';
 import { TranscriptionResult } from '../types';
-import { Copy, Check, Download, List, FileText, User, FileType, File, Clock } from 'lucide-react';
+import { Copy, Check, Download, List, FileText, User, FileType, File, Clock, ExternalLink } from 'lucide-react';
 import { jsPDF } from "jspdf";
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from "docx";
 
@@ -99,6 +100,28 @@ export const ResultDisplay: React.FC<ResultDisplayProps> = ({ result }) => {
               ))}
             </ul>
           </section>
+
+          {/* Renderização de URLs de busca conforme diretrizes do Google Search Grounding */}
+          {result.sourceUrls && result.sourceUrls.length > 0 && (
+            <section className="bg-zinc-900 border border-zinc-800 p-6 rounded-2xl">
+              <h3 className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-4">Fontes de Pesquisa</h3>
+              <ul className="space-y-2">
+                {result.sourceUrls.map((source, i) => (
+                  <li key={i}>
+                    <a 
+                      href={source.web.uri} 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      className="text-xs text-violet-400 hover:text-violet-300 flex items-center gap-2 transition-colors truncate"
+                    >
+                      <ExternalLink size={12} />
+                      {source.web.title}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
         </div>
 
         <div className="lg:col-span-2 h-[600px] flex flex-col bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">

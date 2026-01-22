@@ -1,41 +1,28 @@
 
+
 import { GoogleGenAI, Type } from "@google/genai";
 import { TranscriptionResult } from "../types";
+
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+// Prompt otimizado: Instruções densas em menos tokens
+const SYSTEM_PROMPT = `Transcritor Literal. Regras: 1. Texto 100% fiel; 2. Timestamps [MM:SS] a cada ~30s ou troca de assunto; 3. Identifique falas (P1, P2); 4. Sem resumos.`;
 
 const blobToBase64 = (blob: Blob): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onloadend = () => {
-      const result = reader.result as string;
-      const base64 = result.split(',')[1];
-      resolve(base64);
-    };
+    reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
     reader.onerror = reject;
     reader.readAsDataURL(blob);
   });
 };
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
-// --- SYSTEM INSTRUCTIONS ---
-const SYSTEM_PROMPT = `Você é um TRANSCRITOR BRUTAL. 
-Sua única missão é converter áudio/vídeo em texto LITERAL. 
-REGRAS:
-1. NUNCA resuma durante a transcrição.
-2. SEMPRE inclua marcações de tempo no formato [MM:SS] a cada mudança de assunto ou a cada 30 segundos.
-3. Mantenha gírias, hesitações (hmmm, ah) e erros de fala se forem relevantes para o contexto.
-4. Identifique palestrantes como "P1:", "P2:" se houver mais de um.
-5. Se o conteúdo for muito longo, priorize a fidelidade absoluta das palavras.`;
-
-// --- FILE TRANSCRIPTION (CHUNKS) ---
-
-async function transcribeChunk(blob: Blob, mimeType: string, index: number, total: number): Promise<string> {
+async function transcribeChunk(blob: Blob, mimeType: string, startTimeSeconds: number): Promise<string> {
   const base64Data = await blobToBase64(blob);
-  const startTime = (index - 1) * 25; // 25s chunks
-  const timeLabel = `[${Math.floor(startTime/60).toString().padStart(2, '0')}:${(startTime%60).toString().padStart(2, '0')}]`;
+  const timeLabel = `[${Math.floor(startTimeSeconds/60).toString().padStart(2, '0')}:${(startTimeSeconds%60).toString().padStart(2, '0')}]`;
 
-  let retries = 5;
-  let delay = 2000;
+  let retries = 3;
+  let backoff = 3000;
 
   while (retries > 0) {
     try {
@@ -43,8 +30,8 @@ async function transcribeChunk(blob: Blob, mimeType: string, index: number, tota
         model: "gemini-3-flash-preview",
         contents: {
           parts: [
-            { inlineData: { data: base64Data, mimeType: mimeType } },
-            { text: `Transcreva este áudio literalmente. Comece com a marcação ${timeLabel}. Não ignore nenhuma palavra.` }
+            { inlineData: { data: base64Data, mimeType } },
+            { text: `Transcreva literalmente a partir de ${timeLabel}.` }
           ]
         },
         config: { 
@@ -54,11 +41,15 @@ async function transcribeChunk(blob: Blob, mimeType: string, index: number, tota
       });
       return response.text || "";
     } catch (e: any) {
-      console.warn(`Chunk ${index} failed, retrying...`, e);
+      // Se for erro de quota (429), espera mais tempo
+      const isQuota = e.message?.includes('429') || e.message?.includes('quota');
+      console.warn(`Erro no chunk (${isQuota ? 'Quota' : 'Rede'}). Retentando...`);
+      
       retries--;
-      if (retries === 0) return `\n${timeLabel} [Falha na captura deste trecho]\n`;
-      await new Promise(r => setTimeout(r, delay + Math.random() * 1000));
-      delay = Math.min(delay * 2, 32000);
+      if (retries === 0) return `\n${timeLabel} [Falha: Limite de API atingido]\n`;
+      
+      await new Promise(r => setTimeout(r, isQuota ? backoff * 2 : backoff));
+      backoff *= 2;
     }
   }
   return "";
@@ -70,17 +61,22 @@ export const transcribeFile = async (
   onProgress?: (msg: string) => void
 ): Promise<TranscriptionResult> => {
   const fullTranscriptParts: string[] = [];
+  const CHUNK_SIZE_SEC = 60; // Aumentado para 60s para economizar tokens/chamadas
+
   for (let i = 0; i < audioBlobs.length; i++) {
-    onProgress?.(`Extraindo: ${Math.round(((i + 1) / audioBlobs.length) * 100)}% (Parte ${i + 1}/${audioBlobs.length})`);
-    if (i > 0) await new Promise(r => setTimeout(r, 800)); // Rate limit safety
-    const partText = await transcribeChunk(audioBlobs[i], mimeType, i + 1, audioBlobs.length);
+    const progress = Math.round(((i + 1) / audioBlobs.length) * 100);
+    onProgress?.(`IA: ${progress}% (${i + 1}/${audioBlobs.length})`);
+    
+    // Pequeno delay entre partes para não estourar o Rate Limit por segundo
+    if (i > 0) await new Promise(r => setTimeout(r, 1200)); 
+    
+    const startTime = i * CHUNK_SIZE_SEC;
+    const partText = await transcribeChunk(audioBlobs[i], mimeType, startTime);
     fullTranscriptParts.push(partText);
   }
-  const fullText = fullTranscriptParts.join("\n");
-  return analyzeText(fullText, onProgress);
+  
+  return analyzeText(fullTranscriptParts.join("\n"), onProgress);
 };
-
-// --- URL TRANSCRIPTION ---
 
 export const transcribeUrl = async (
   url: string,
@@ -90,76 +86,71 @@ export const transcribeUrl = async (
   
   const isDirectMedia = /\.(mp3|wav|m4a|mp4|mov|ogg|flac|webm)$/i.test(url.split('?')[0]);
   if (isDirectMedia && processLocalFile) {
-    onProgress?.("Baixando mídia direta para precisão de 100%...");
+    onProgress?.("Baixando mídia...");
     try {
       const resp = await fetch(url);
       const blob = await resp.blob();
-      const file = new File([blob], url.split('/').pop() || 'media', { type: blob.type });
-      return await processLocalFile(file);
-    } catch (e) { console.warn("Fetch local falhou, usando Search..."); }
+      return await processLocalFile(new File([blob], "media", { type: blob.type }));
+    } catch (e) { /* fallback para search */ }
   }
 
   const isYouTube = url.includes('youtube.com') || url.includes('youtu.be');
-  onProgress?.(isYouTube ? "Infiltrando no YouTube para coletar legendas literais..." : "Mapeando conteúdo da URL...");
+  onProgress?.(isYouTube ? "Lendo legendas do YouTube..." : "Analisando URL...");
   
   try {
-    const prompt = isYouTube 
-      ? `Acesse o vídeo: ${url}. 
-         Sua missão é a extração TOTAL das legendas (SRT/VTT). 
-         Eu preciso do texto LITERAL com os TIMESTAMPS originais. 
-         Não resuma. Se o vídeo for longo, forneça a transcrição organizada por blocos de tempo [MM:SS]. 
-         Retorne o texto completo falado no vídeo.`
-      : `URL: ${url}. Extraia a transcrição palavra por palavra de qualquer mídia ou texto longo presente. Inclua timestamps [MM:SS] se houver áudio.`;
-
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: prompt,
+      contents: `Extraia transcrição literal com timestamps de: ${url}`,
       config: {
         systemInstruction: SYSTEM_PROMPT,
         tools: [{ googleSearch: {} }],
       },
     });
 
-    const fullText = response.text || "";
-    if (fullText.length < 150) throw new Error("Conteúdo insuficiente para transcrição literal.");
+    // Extracting grounding metadata for Google Search results as per guidelines
+    const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+    const sourceUrls = groundingChunks
+      ?.filter((c: any) => c.web)
+      .map((c: any) => ({
+        web: {
+          uri: c.web.uri,
+          title: c.web.title || c.web.uri
+        }
+      }));
 
-    onProgress?.("Estruturando dados finais...");
-    return await analyzeText(fullText, onProgress);
+    const result = await analyzeText(response.text || "", onProgress);
+    return { 
+      ...result, 
+      sourceUrls: (sourceUrls && sourceUrls.length > 0) ? sourceUrls : undefined 
+    };
   } catch (error: any) {
-    throw new Error("Não foi possível extrair a transcrição literal deste link. Tente baixar o vídeo e fazer o upload do arquivo para precisão total.");
+    throw new Error("Erro na extração via link. Tente o upload do arquivo.");
   }
 };
 
 async function analyzeText(text: string, onProgress?: (msg: string) => void): Promise<TranscriptionResult> {
-  onProgress?.("Gerando Inteligência Brutal...");
+  if (!text) throw new Error("Transcrição vazia.");
+  onProgress?.("Finalizando...");
   
-  const responseSchema = {
-    type: Type.OBJECT,
-    properties: {
-      summary: { type: Type.STRING },
-      keyPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
-      speakers: { type: Type.ARRAY, items: { type: Type.STRING } },
-      suggestedTitle: { type: Type.STRING },
-    },
-    required: ["summary", "keyPoints", "speakers", "suggestedTitle"],
-  };
-
-  const analysisResponse = await ai.models.generateContent({
+  const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
     contents: { parts: [{ text: `TEXTO:\n${text}` }] },
     config: {
-      systemInstruction: "Analise esta transcrição brutal. Crie um título foda, um resumo denso, pontos de impacto e identifique quem falou.",
+      systemInstruction: "Gere JSON: {suggestedTitle, summary, keyPoints: [], speakers: []}",
       responseMimeType: "application/json",
-      responseSchema: responseSchema,
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          summary: { type: Type.STRING },
+          keyPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
+          speakers: { type: Type.ARRAY, items: { type: Type.STRING } },
+          suggestedTitle: { type: Type.STRING },
+        },
+        required: ["summary", "keyPoints", "speakers", "suggestedTitle"],
+      },
     },
   });
 
-  const metadata = JSON.parse(analysisResponse.text || "{}");
-  return {
-    text: text,
-    summary: metadata.summary,
-    keyPoints: metadata.keyPoints,
-    speakers: metadata.speakers,
-    suggestedTitle: metadata.suggestedTitle,
-  };
+  const metadata = JSON.parse(response.text || "{}");
+  return { text, ...metadata };
 }
