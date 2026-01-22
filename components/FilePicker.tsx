@@ -1,9 +1,9 @@
 
 import React, { useRef, useState } from 'react';
-import { Upload, Music, Video, FileAudio } from 'lucide-react';
+import { Upload, Music, Video, FileAudio, Layers } from 'lucide-react';
 
 interface FilePickerProps {
-  onFileSelect: (file: File) => void;
+  onFileSelect: (files: File[]) => void;
   disabled: boolean;
 }
 
@@ -25,16 +25,22 @@ export const FilePicker: React.FC<FilePickerProps> = ({ onFileSelect, disabled }
     e.preventDefault();
     setIsDragging(false);
     if (disabled) return;
-    const file = e.dataTransfer.files[0];
-    if (file) validateAndSelect(file);
+    
+    const droppedFiles = Array.from(e.dataTransfer.files) as File[];
+    validateAndSelect(droppedFiles);
   };
 
-  const validateAndSelect = (file: File) => {
+  const validateAndSelect = (files: File[]) => {
     const validTypes = ['audio/', 'video/'];
-    if (validTypes.some(type => file.type.startsWith(type)) || file.name.endsWith('.mp3') || file.name.endsWith('.mp4')) {
-        onFileSelect(file);
+    const validFiles = files.filter(file => 
+        validTypes.some(type => file.type.startsWith(type)) || 
+        file.name.match(/\.(mp3|wav|m4a|mp4|mov|ogg|flac|webm)$/i)
+    );
+
+    if (validFiles.length > 0) {
+        onFileSelect(validFiles);
     } else {
-        alert("Por favor, envie um arquivo de áudio ou vídeo válido.");
+        alert("Nenhum arquivo de áudio ou vídeo válido encontrado.");
     }
   };
 
@@ -44,7 +50,7 @@ export const FilePicker: React.FC<FilePickerProps> = ({ onFileSelect, disabled }
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       className={`
-        relative group cursor-pointer border-2 border-dashed rounded-2xl p-12 transition-all duration-300
+        relative group cursor-pointer border-2 border-dashed rounded-2xl p-10 transition-all duration-300
         ${isDragging ? 'border-violet-500 bg-violet-500/5' : 'border-zinc-800 hover:border-zinc-700 bg-zinc-900/50'}
         ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
       `}
@@ -54,34 +60,29 @@ export const FilePicker: React.FC<FilePickerProps> = ({ onFileSelect, disabled }
         type="file"
         ref={inputRef}
         className="hidden"
-        accept="audio/*,video/*"
-        onChange={(e) => e.target.files?.[0] && validateAndSelect(e.target.files[0])}
+        accept="audio/*,video/*,.webm"
+        multiple
+        onChange={(e) => e.target.files && validateAndSelect(Array.from(e.target.files) as File[])}
         disabled={disabled}
       />
       
       <div className="flex flex-col items-center gap-4 text-center">
         <div className="w-16 h-16 rounded-2xl bg-zinc-800 flex items-center justify-center text-zinc-400 group-hover:text-violet-400 group-hover:bg-violet-500/10 transition-colors">
-          <Upload size={32} />
+          <Layers size={32} />
         </div>
         <div>
           <h3 className="text-xl font-bold mb-1">
-            Solte sua mídia aqui
+            Solte seus arquivos aqui
           </h3>
-          <p className="text-zinc-500 max-w-xs mx-auto">
-            Suporte para MP3, WAV, M4A, MP4, MOV e mais. 
-            Precisão máxima garantida.
+          <p className="text-zinc-500 max-w-xs mx-auto text-sm">
+            Processamento multi-processual. <br/>
+            MP3, WAV, WebM, MP4 e MOV.
           </p>
         </div>
-        <div className="flex gap-4 mt-2">
-            <div className="flex items-center gap-1.5 px-3 py-1 bg-zinc-800 rounded-full text-xs font-medium text-zinc-400">
-                <Music size={14} /> Áudio
-            </div>
-            <div className="flex items-center gap-1.5 px-3 py-1 bg-zinc-800 rounded-full text-xs font-medium text-zinc-400">
-                <Video size={14} /> Vídeo
-            </div>
-            <div className="flex items-center gap-1.5 px-3 py-1 bg-zinc-800 rounded-full text-xs font-medium text-zinc-400">
-                <FileAudio size={14} /> Podcast
-            </div>
+        <div className="flex gap-4 mt-2 justify-center opacity-60">
+            <Music size={16} />
+            <Video size={16} />
+            <FileAudio size={16} />
         </div>
       </div>
     </div>

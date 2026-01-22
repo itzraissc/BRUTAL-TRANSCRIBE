@@ -1,63 +1,29 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Layout } from './components/Layout';
 import { FilePicker } from './components/FilePicker';
-import { StatusIndicator } from './components/StatusIndicator';
 import { ResultDisplay } from './components/ResultDisplay';
-import { transcribeFile } from './services/gemini';
-import { TranscriptionResult, ProcessingStatus, FileMetadata } from './types';
-import { AlertTriangle, RotateCcw, Info } from 'lucide-react';
+import { StatusIndicator } from './components/StatusIndicator';
+import { transcribeFile, transcribeUrl } from './services/gemini';
+import { QueueItem, TranscriptionResult } from './types';
+import { AlertTriangle, Info, Trash2, CheckCircle2, Loader2, ChevronDown, ChevronUp, FileAudio, Link as LinkIcon, Plus, Zap } from 'lucide-react';
+
+const CONCURRENCY_LIMIT = 3;
 
 const App: React.FC = () => {
-  const [status, setStatus] = useState<ProcessingStatus>('idle');
-  const [result, setResult] = useState<TranscriptionResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [fileMeta, setFileMeta] = useState<FileMetadata | null>(null);
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [urlInput, setUrlInput] = useState('');
+  // Rastreamos quantos itens estão sendo processados no momento
+  const [activeCount, setActiveCount] = useState(0);
 
-  // Compressor Brutal: Transforma qualquer áudio/vídeo em Mono 16kHz WAV
-  // Essencial para aceitar arquivos gigantes dentro do limite da API
-  const compressAudio = async (file: File): Promise<{ base64: string, mimeType: string }> => {
-    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-    const arrayBuffer = await file.arrayBuffer();
-    
-    // Decodifica o áudio original (vídeo ou áudio)
-    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-    
-    // Reamostragem para 16kHz (Padrão de ouro para voz humana)
-    const targetSampleRate = 16000;
-    const offlineCtx = new OfflineAudioContext(1, Math.ceil(audioBuffer.duration * targetSampleRate), targetSampleRate);
-    
-    const source = offlineCtx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(offlineCtx.destination);
-    source.start();
-    
-    const renderedBuffer = await offlineCtx.startRendering();
-    
-    // Converte para WAV simples de 16-bit
-    const wavBlob = bufferToWav(renderedBuffer);
-    
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const base64 = (reader.result as string).split(',')[1];
-        resolve({ base64, mimeType: 'audio/wav' });
-      };
-      reader.readAsDataURL(wavBlob);
-    });
-  };
+  // --- AUDIO HELPERS ---
 
-  // Helper para gerar o Header WAV (Preciso e leve)
   const bufferToWav = (buffer: AudioBuffer): Blob => {
     const length = buffer.length * 2;
     const view = new DataView(new ArrayBuffer(44 + length));
-    
     const writeString = (offset: number, string: string) => {
-      for (let i = 0; i < string.length; i++) {
-        view.setUint8(offset + i, string.charCodeAt(i));
-      }
+      for (let i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i));
     };
-
     writeString(0, 'RIFF');
     view.setUint32(4, 36 + length, true);
     writeString(8, 'WAVE');
@@ -71,7 +37,6 @@ const App: React.FC = () => {
     view.setUint16(34, 16, true);
     writeString(36, 'data');
     view.setUint32(40, length, true);
-
     const channelData = buffer.getChannelData(0);
     let offset = 44;
     for (let i = 0; i < channelData.length; i++) {
@@ -79,128 +44,266 @@ const App: React.FC = () => {
       view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
       offset += 2;
     }
-
     return new Blob([view], { type: 'audio/wav' });
   };
 
-  const handleFileSelect = async (file: File) => {
-    setError(null);
-    setResult(null);
-    setFileMeta({ name: file.name, size: file.size, type: file.type });
+  const processAudio = async (file: File): Promise<Blob[]> => {
+    // Suporte reforçado para WebM e outros formatos
+    const isNative = file.type.includes('webm') || file.type.startsWith('audio/') || file.name.match(/\.(mp3|wav|m4a|aac|ogg|flac|webm)$/i);
     
-    // Limite brutal de 500MB
-    if (file.size > 500 * 1024 * 1024) {
-      setError("Arquivo excede o limite máximo de 500MB.");
-      return;
-    }
-
+    // Se for um arquivo pequeno e nativo, enviamos direto
+    if (isNative && file.size < 0.5 * 1024 * 1024) return [file];
+    
+    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const arrayBuffer = await file.arrayBuffer();
+    
     try {
-      setStatus('optimizing');
-      // Extrai e comprime o áudio localmente (Mesmo de arquivos 500MB)
-      const { base64, mimeType } = await compressAudio(file);
-      
-      setStatus('uploading');
-      // O upload agora é minúsculo (apenas o áudio essencial)
-      setStatus('processing');
-      const transcription = await transcribeFile(base64, mimeType);
-      
-      setResult(transcription);
-      setStatus('success');
-    } catch (err: any) {
-      console.error("Erro no fluxo:", err);
-      let msg = "Erro no processamento. ";
-      if (err.message.includes("decode")) msg += "O formato do arquivo pode estar corrompido ou é incompatível.";
-      else msg += err.message;
-      
-      setError(msg);
-      setStatus('error');
+        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+        const CHUNK_DURATION = 25; 
+        const chunks: Blob[] = [];
+        const TARGET_RATE = 16000; 
+        
+        for (let start = 0; start < audioBuffer.duration; start += CHUNK_DURATION) {
+            const end = Math.min(start + CHUNK_DURATION, audioBuffer.duration);
+            const duration = end - start;
+            const offlineCtx = new OfflineAudioContext(1, Math.ceil(duration * TARGET_RATE), TARGET_RATE);
+            const source = offlineCtx.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(offlineCtx.destination);
+            source.start(0, start, duration);
+            const renderedBuffer = await offlineCtx.startRendering();
+            chunks.push(bufferToWav(renderedBuffer));
+        }
+        return chunks;
+    } catch (e) {
+        console.error("Falha ao decodificar áudio. O formato pode não ser suportado pelo navegador.", e);
+        throw new Error("Formato de áudio/vídeo incompatível para processamento local.");
     }
   };
 
-  const reset = () => {
-    setStatus('idle');
-    setResult(null);
-    setError(null);
-    setFileMeta(null);
+  const internalTranscribeFile = async (file: File, id: string): Promise<TranscriptionResult> => {
+    updateItem(id, { status: 'optimizing', progressMsg: 'Otimizando Áudio...' });
+    const chunks = await processAudio(file);
+    updateItem(id, { status: 'uploading', progressMsg: `Enviando ${chunks.length} partes...` });
+    updateItem(id, { status: 'processing', progressMsg: 'IA Analisando...' });
+    return await transcribeFile(chunks, chunks[0].type || 'audio/wav', (msg) => updateItem(id, { progressMsg: msg }));
+  };
+
+  // --- QUEUE MANAGEMENT ---
+
+  const handleFilesSelect = (files: File[]) => {
+    const newItems: QueueItem[] = files.map(file => ({
+      id: Math.random().toString(36).substring(7),
+      sourceType: 'file',
+      file,
+      status: 'idle',
+      progressMsg: 'Aguardando vez...',
+      result: null,
+      error: null,
+      createdAt: Date.now(),
+      expanded: false
+    }));
+    setQueue(prev => [...prev, ...newItems]);
+  };
+
+  const handleAddLink = () => {
+    if (!urlInput.trim()) return;
+    const urls = urlInput.split(/[\s,]+/).filter(u => u.startsWith('http'));
+    const newItems: QueueItem[] = urls.map(url => ({
+      id: Math.random().toString(36).substring(7),
+      sourceType: 'url',
+      url,
+      status: 'idle',
+      progressMsg: 'Fila de espera...',
+      result: null,
+      error: null,
+      createdAt: Date.now(),
+      expanded: false
+    }));
+    setQueue(prev => [...prev, ...newItems]);
+    setUrlInput('');
+  };
+
+  const updateItem = (id: string, updates: Partial<QueueItem>) => {
+    setQueue(prev => prev.map(item => item.id === id ? { ...item, ...updates } : item));
+  };
+
+  const removeFromQueue = (id: string) => {
+    setQueue(prev => prev.filter(item => item.id !== id));
+  };
+
+  const toggleExpand = (id: string) => {
+    setQueue(prev => prev.map(item => item.id === id ? { ...item, expanded: !item.expanded } : item));
+  };
+
+  // --- MULTI-PROCESSOR LOOP ---
+
+  useEffect(() => {
+    const spawnWorkers = async () => {
+      // Se já atingimos o limite de processos ativos, não fazemos nada
+      if (activeCount >= CONCURRENCY_LIMIT) return;
+
+      // Encontrar o próximo item que está "idle"
+      const nextItem = queue.find(item => item.status === 'idle');
+      if (!nextItem) return;
+
+      // Iniciar processamento
+      processItem(nextItem);
+    };
+
+    spawnWorkers();
+  }, [queue, activeCount]);
+
+  const processItem = async (item: QueueItem) => {
+    setActiveCount(prev => prev + 1);
+    const { id, sourceType, file, url } = item;
+    
+    // Marcar como 'uploading' inicialmente para sinalizar atividade
+    updateItem(id, { status: 'uploading', progressMsg: 'Iniciando...' });
+
+    try {
+      if (sourceType === 'file' && file) {
+        const result = await internalTranscribeFile(file, id);
+        updateItem(id, { status: 'success', result, expanded: true, progressMsg: 'Concluído' });
+      } else if (sourceType === 'url' && url) {
+        updateItem(id, { status: 'processing', progressMsg: 'Conectando ao link...' });
+        const result = await transcribeUrl(
+            url, 
+            (msg) => updateItem(id, { progressMsg: msg }),
+            (downloadedFile) => internalTranscribeFile(downloadedFile, id)
+        );
+        updateItem(id, { status: 'success', result, expanded: true, progressMsg: 'Concluído' });
+      }
+    } catch (err: any) {
+      updateItem(id, { status: 'error', error: err.message || "Erro de processamento", progressMsg: 'Falha' });
+    } finally {
+      setActiveCount(prev => Math.max(0, prev - 1));
+    }
   };
 
   return (
     <Layout>
-      <div className="space-y-12">
-        {status === 'idle' && (
-          <div className="text-center space-y-6 max-w-2xl mx-auto">
-            <h1 className="text-5xl sm:text-7xl font-black italic tracking-tighter leading-none uppercase">
+      <div className="space-y-12 pb-20">
+        <div className="text-center space-y-6 max-w-2xl mx-auto">
+            <h1 className="text-4xl sm:text-6xl font-black italic tracking-tighter leading-none uppercase">
                 Brutal <br/>
-                <span className="text-transparent bg-clip-text bg-gradient-to-r from-violet-400 to-indigo-600">500MB Ready</span>
+                <span className="text-transparent bg-clip-text bg-gradient-to-r from-violet-400 to-indigo-600">Transcribe</span>
             </h1>
-            <p className="text-lg text-zinc-400 font-medium max-w-lg mx-auto leading-relaxed">
-              Otimização inteligente embutida. Transcreva podcasts e reuniões gigantes sem custo de banda.
-            </p>
-          </div>
-        )}
-
-        <div className="relative">
-          {status === 'idle' && (
-            <div className="space-y-8 animate-in fade-in zoom-in-95 duration-700">
-               <FilePicker onFileSelect={handleFileSelect} disabled={false} />
-               
-               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  {[
-                    { title: "Limite de 500MB", desc: "Compressão local antes do upload." },
-                    { title: "Grátis & Ilimitado", desc: "Uso otimizado da API Flash." },
-                    { title: "Precisão 16kHz", desc: "Foco total na clareza da voz humana." }
-                  ].map((feat, i) => (
-                    <div key={i} className="bg-zinc-900/30 border border-zinc-800 p-5 rounded-2xl">
-                      <h4 className="font-bold text-white mb-1 uppercase text-xs tracking-widest">{feat.title}</h4>
-                      <p className="text-zinc-500 text-sm">{feat.desc}</p>
+            <div className="flex flex-col items-center gap-2">
+                <p className="text-lg text-zinc-400 font-medium leading-relaxed">
+                  Transcrição Literal Multi-Processo de Arquivos e URLs.
+                </p>
+                {activeCount > 0 && (
+                    <div className="flex items-center gap-2 px-3 py-1 bg-violet-500/10 border border-violet-500/20 rounded-full">
+                        <Zap size={12} className="text-violet-400 animate-pulse" />
+                        <span className="text-[10px] font-bold text-violet-400 uppercase tracking-widest">
+                            {activeCount} Processos Ativos
+                        </span>
                     </div>
-                  ))}
-               </div>
+                )}
             </div>
-          )}
-
-          {status !== 'idle' && status !== 'success' && status !== 'error' && (
-            <StatusIndicator status={status} />
-          )}
-
-          {status === 'error' && (
-            <div className="bg-red-500/5 border border-red-500/20 p-8 rounded-3xl text-center space-y-4 max-w-xl mx-auto">
-              <div className="w-16 h-16 bg-red-500/10 text-red-500 rounded-2xl flex items-center justify-center mx-auto">
-                <AlertTriangle size={32} />
-              </div>
-              <div className="space-y-2">
-                <h3 className="text-xl font-bold text-white">Falha no Processamento</h3>
-                <p className="text-zinc-400 text-sm">{error}</p>
-              </div>
-              <button
-                onClick={reset}
-                className="flex items-center gap-2 mx-auto px-6 py-3 bg-white text-black font-black uppercase tracking-tight rounded-xl hover:bg-zinc-200 transition-colors"
-              >
-                <RotateCcw size={18} /> Tentar Novamente
-              </button>
-            </div>
-          )}
-
-          {status === 'success' && result && (
-            <div className="space-y-8">
-                <ResultDisplay result={result} />
-                <div className="flex justify-center pt-8 border-t border-zinc-800">
-                    <button
-                        onClick={reset}
-                        className="flex items-center gap-2 px-6 py-3 border border-zinc-700 hover:border-zinc-500 text-zinc-400 hover:text-white transition-all rounded-xl text-sm font-bold uppercase tracking-widest"
-                    >
-                        <RotateCcw size={16} /> Nova Transcrição
-                    </button>
-                </div>
-            </div>
-          )}
         </div>
 
-        {status === 'idle' && (
+        <div className="max-w-3xl mx-auto space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700">
+           <div className="flex gap-2 p-2 bg-zinc-900 border border-zinc-800 rounded-2xl shadow-xl focus-within:border-violet-500/50 transition-all">
+                <div className="flex-1 flex items-center px-4 gap-3">
+                    <LinkIcon size={18} className="text-zinc-500" />
+                    <input 
+                        type="text" 
+                        value={urlInput}
+                        onChange={(e) => setUrlInput(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleAddLink()}
+                        placeholder="Youtube, Webm links ou URLs de áudio..."
+                        className="bg-transparent border-none outline-none text-zinc-200 w-full text-sm font-medium placeholder:text-zinc-600"
+                    />
+                </div>
+                <button 
+                    onClick={handleAddLink}
+                    disabled={!urlInput.trim()}
+                    className="p-3 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 disabled:bg-zinc-800 text-white rounded-xl transition-all flex items-center gap-2 font-bold text-xs uppercase tracking-widest"
+                >
+                    <Plus size={16} /> Enfileirar
+                </button>
+           </div>
+
+           <div className="flex items-center gap-4">
+               <div className="h-px bg-zinc-800 flex-1"></div>
+               <span className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.2em]">ou</span>
+               <div className="h-px bg-zinc-800 flex-1"></div>
+           </div>
+
+           <FilePicker onFileSelect={handleFilesSelect} disabled={false} />
+        </div>
+
+        {queue.length > 0 && (
+            <div className="max-w-4xl mx-auto space-y-4">
+                <div className="flex items-center justify-between px-2">
+                    <div className="flex items-center gap-3">
+                        <h3 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Fila de Processamento</h3>
+                        <span className="px-2 py-0.5 bg-zinc-800 text-zinc-400 text-[10px] font-bold rounded-full">
+                            {queue.length} ITENS
+                        </span>
+                    </div>
+                    <button onClick={() => setQueue([])} className="text-xs text-red-500 hover:text-red-400 font-medium uppercase tracking-wider">Limpar Lista</button>
+                </div>
+
+                <div className="space-y-3">
+                    {queue.map((item) => (
+                        <div key={item.id} className={`bg-zinc-900 border transition-all duration-300 rounded-xl overflow-hidden ${['optimizing', 'uploading', 'processing'].includes(item.status) ? 'border-violet-500/50 bg-violet-500/[0.02] shadow-[0_0_20px_rgba(124,58,237,0.05)]' : 'border-zinc-800'} ${item.status === 'error' ? 'border-red-900/50 bg-red-950/10' : ''}`}>
+                            <div className="p-4 flex items-center gap-4">
+                                <div className="shrink-0">
+                                    {item.status === 'idle' && (
+                                        <div className="w-8 h-8 rounded-lg bg-zinc-800 flex items-center justify-center text-zinc-600">
+                                            {item.sourceType === 'file' ? <FileAudio size={16} /> : <LinkIcon size={16} />}
+                                        </div>
+                                    )}
+                                    {['optimizing', 'uploading', 'processing'].includes(item.status) && (
+                                        <div className="w-8 h-8 rounded-lg bg-violet-500/20 flex items-center justify-center">
+                                            <Loader2 size={16} className="text-violet-500 animate-spin" />
+                                        </div>
+                                    )}
+                                    {item.status === 'success' && <CheckCircle2 size={24} className="text-emerald-500" />}
+                                    {item.status === 'error' && <AlertTriangle size={24} className="text-red-500" />}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2 mb-0.5">
+                                        <h4 className="font-bold text-zinc-200 truncate text-sm">{item.sourceType === 'file' ? item.file?.name : item.url}</h4>
+                                        <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${item.sourceType === 'file' ? 'bg-zinc-800 text-zinc-500' : 'bg-violet-500/10 text-violet-400'}`}>
+                                            {item.sourceType === 'file' ? `${(item.file!.size / 1024 / 1024).toFixed(1)}MB` : 'LINK'}
+                                        </span>
+                                    </div>
+                                    <p className={`text-[10px] uppercase font-bold tracking-wider truncate ${item.status === 'error' ? 'text-red-400' : 'text-zinc-500'}`}>
+                                        {item.status === 'error' ? item.error : item.progressMsg}
+                                    </p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    {item.status === 'success' && <button onClick={() => toggleExpand(item.id)} className="p-2 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white">{item.expanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}</button>}
+                                    {['idle', 'error', 'success'].includes(item.status) && <button onClick={() => removeFromQueue(item.id)} className="p-2 hover:bg-red-500/10 text-zinc-600 hover:text-red-500 rounded-lg"><Trash2 size={16} /></button>}
+                                </div>
+                            </div>
+                            
+                            {['optimizing', 'uploading', 'processing'].includes(item.status) && (
+                                <div className="px-4 pb-4 pt-1 border-t border-zinc-800/50">
+                                    <StatusIndicator status={item.status} progressDetail={item.progressMsg} compact />
+                                </div>
+                            )}
+
+                            {item.status === 'success' && item.result && item.expanded && (
+                                <div className="border-t border-zinc-800 bg-zinc-950/30 p-4 sm:p-6 animate-in slide-in-from-top-2 duration-300">
+                                    <ResultDisplay result={item.result} />
+                                </div>
+                            )}
+                        </div>
+                    ))}
+                </div>
+            </div>
+        )}
+
+        {queue.length === 0 && (
             <div className="bg-zinc-900/20 border border-zinc-800/50 p-4 rounded-xl flex items-start gap-4 max-w-lg mx-auto">
                 <Info size={20} className="text-violet-400 shrink-0 mt-0.5" />
                 <p className="text-[11px] text-zinc-500 leading-tight">
-                    Arquivos grandes (até 500MB) são otimizados localmente no seu navegador. Apenas os dados de voz essenciais são enviados, garantindo velocidade brutal e precisão máxima com Gemini 3 Flash.
+                    O sistema processa até <strong>3 vídeos simultaneamente</strong> para máxima velocidade. Formatos aceitos: MP3, WAV, WebM, MP4 e links do YouTube.
                 </p>
             </div>
         )}
